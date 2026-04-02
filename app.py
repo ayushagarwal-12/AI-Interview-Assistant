@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 import re
+import time
+import threading
 from ai_engine import fetch_questions, check_answer, get_overall_summary
 from dotenv import load_dotenv
 
@@ -40,7 +42,7 @@ with st.sidebar:
     skills = st.text_input("Core Skills", value="Python, SQL")
     diff = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"])
     q_type = st.selectbox("Interview Type", ["Technical", "HR", "Behavioral"])
-    q_count = st.slider("Number of Questions", 5, 10, 5)
+    q_count = st.slider("Number of Questions", 1, 10, 5)
     
     if st.button("Generate Questions", type="primary", use_container_width=True):
         if not domain.strip():
@@ -77,30 +79,52 @@ else:
                     st.markdown("### Evaluation")
                     if "Error" in feedback:
                         st.error(feedback)
+                    elif feedback == "Skipped":
+                        st.warning("Skipped: No answer provided.")
                     else:
                         st.info(feedback)
                     
         submit_all = st.form_submit_button("Submit All Answers", type="primary")
         
     if submit_all:
-        missing_answers = False
-        for i in range(len(st.session_state.questions)):
-            if not st.session_state.get(f"ans_{i}", "").strip():
-                missing_answers = True
-                break
-                
-        if missing_answers:
-            st.warning("Please answer all questions before submitting.")
-        else:
-            with st.spinner("Evaluating your answers..."):
-                for i, q in enumerate(st.session_state.questions):
-                    user_ans = st.session_state[f"ans_{i}"]
+        messages = ["Analyzing your answer...", "Checking concepts...", "Almost there...", "Finalizing feedback..."]
+        status_placeholder = st.empty()
+        
+        eval_results = {}
+        questions_to_eval = list(st.session_state.questions)
+        user_answers = {i: st.session_state.get(f"ans_{i}", "") for i in range(len(questions_to_eval))}
+        
+        def run_evals():
+            for i, q in enumerate(questions_to_eval):
+                user_ans = user_answers[i]
+                if not user_ans.strip():
+                    eval_results[i] = {
+                        "ans": user_ans,
+                        "feedback": "Skipped"
+                    }
+                else:
                     result = check_answer(q, user_ans)
-                    st.session_state.evals[i] = {
+                    eval_results[i] = {
                         "ans": user_ans,
                         "feedback": result
                     }
-                st.rerun()
+                    
+        eval_thread = threading.Thread(target=run_evals)
+        eval_thread.start()
+        
+        msg_idx = 0
+        while eval_thread.is_alive():
+            status_placeholder.info(f"⏳ {messages[msg_idx % len(messages)]}")
+            time.sleep(1.5)
+            msg_idx += 1
+            
+        eval_thread.join()
+        status_placeholder.empty()
+        
+        for i, res in eval_results.items():
+            st.session_state.evals[i] = res
+            
+        st.rerun()
 
     if len(st.session_state.evals) == len(st.session_state.questions) and len(st.session_state.questions) > 0:
         st.divider()
@@ -122,7 +146,8 @@ else:
             with st.spinner("Generating summary..."):
                 qa_history = ""
                 for idx, ev in st.session_state.evals.items():
-                    qa_history += f"\nQuestion: {st.session_state.questions[idx]}\nAnswer: {ev['ans']}\n"
+                    ans_text = ev['ans'] if ev['ans'].strip() else "[Skipped]"
+                    qa_history += f"\nQuestion: {st.session_state.questions[idx]}\nAnswer: {ans_text}\n"
                 
                 summary_output = get_overall_summary(qa_history)
                 if summary_output and not summary_output.startswith("Error"):
